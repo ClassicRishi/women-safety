@@ -5,6 +5,7 @@ from typing import Optional
 from datetime import datetime
 import uuid
 import math
+import httpx
 
 app = FastAPI(title="Women Safety SOS API")
 
@@ -262,6 +263,30 @@ async def find_route(route: RouteRequest):
         },
         "nearby_safety_zones": nearby_safety,
     }
+
+
+@app.get("/api/geocode")
+async def geocode_place(query: str):
+    """Convert a place name to latitude/longitude using OpenStreetMap Nominatim."""
+    async with httpx.AsyncClient() as client:
+        response = await client.get(
+            "https://nominatim.openstreetmap.org/search",
+            params={"q": query, "format": "json", "limit": 5},
+            headers={"User-Agent": "SafeHer-WomenSOS/1.0"},
+        )
+        if response.status_code != 200:
+            raise HTTPException(status_code=502, detail="Geocoding service unavailable")
+        results = response.json()
+        if not results:
+            raise HTTPException(status_code=404, detail="Place not found")
+        return [
+            {
+                "display_name": r.get("display_name", ""),
+                "latitude": float(r["lat"]),
+                "longitude": float(r["lon"]),
+            }
+            for r in results
+        ]
 
 
 @app.get("/api/safety-zones")

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import {
   Shield,
   MapPin,
@@ -195,9 +195,17 @@ function App() {
   const [newRelationship, setNewRelationship] = useState("");
 
   // Route form
-  const [destLat, setDestLat] = useState("");
-  const [destLng, setDestLng] = useState("");
+  const [startPlace, setStartPlace] = useState("");
+  const [destPlace, setDestPlace] = useState("");
+  const [startCoords, setStartCoords] = useState<{lat: number; lng: number} | null>(null);
+  const [destCoords, setDestCoords] = useState<{lat: number; lng: number} | null>(null);
+  const [startSuggestions, setStartSuggestions] = useState<{display_name: string; latitude: number; longitude: number}[]>([]);
+  const [destSuggestions, setDestSuggestions] = useState<{display_name: string; latitude: number; longitude: number}[]>([]);
+  const [showStartSuggestions, setShowStartSuggestions] = useState(false);
+  const [showDestSuggestions, setShowDestSuggestions] = useState(false);
   const [showSafetyRoute, setShowSafetyRoute] = useState(true);
+  const geocodeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [useCurrentLocation, setUseCurrentLocation] = useState(true);
 
   const trackingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(
     null
@@ -375,19 +383,87 @@ function App() {
     }
   };
 
+  // Geocode a place name with debounce
+  const geocodePlace = useCallback(async (query: string, target: "start" | "dest") => {
+    if (query.length < 3) {
+      if (target === "start") setStartSuggestions([]);
+      else setDestSuggestions([]);
+      return;
+    }
+    try {
+      const res = await fetch(`${API_URL}/api/geocode?query=${encodeURIComponent(query)}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (target === "start") {
+          setStartSuggestions(data);
+          setShowStartSuggestions(true);
+        } else {
+          setDestSuggestions(data);
+          setShowDestSuggestions(true);
+        }
+      }
+    } catch {
+      // ignore geocode errors
+    }
+  }, []);
+
+  const debouncedGeocode = useCallback((query: string, target: "start" | "dest") => {
+    if (geocodeTimerRef.current) clearTimeout(geocodeTimerRef.current);
+    geocodeTimerRef.current = setTimeout(() => geocodePlace(query, target), 400);
+  }, [geocodePlace]);
+
+  const handleStartPlaceChange = useCallback((value: string) => {
+    setStartPlace(value);
+    setStartCoords(null);
+    setUseCurrentLocation(false);
+    debouncedGeocode(value, "start");
+  }, [debouncedGeocode]);
+
+  const handleDestPlaceChange = useCallback((value: string) => {
+    setDestPlace(value);
+    setDestCoords(null);
+    debouncedGeocode(value, "dest");
+  }, [debouncedGeocode]);
+
+  const selectStartSuggestion = useCallback((s: {display_name: string; latitude: number; longitude: number}) => {
+    setStartPlace(s.display_name);
+    setStartCoords({lat: s.latitude, lng: s.longitude});
+    setShowStartSuggestions(false);
+    setStartSuggestions([]);
+    setUseCurrentLocation(false);
+  }, []);
+
+  const selectDestSuggestion = useCallback((s: {display_name: string; latitude: number; longitude: number}) => {
+    setDestPlace(s.display_name);
+    setDestCoords({lat: s.latitude, lng: s.longitude});
+    setShowDestSuggestions(false);
+    setDestSuggestions([]);
+  }, []);
+
+  // Effective start coordinates (current location or selected place)
+  const effectiveStartCoords = useMemo(() => {
+    if (useCurrentLocation && currentLocation) {
+      return { lat: currentLocation.latitude, lng: currentLocation.longitude };
+    }
+    return startCoords;
+  }, [useCurrentLocation, currentLocation, startCoords]);
+
   // Find route
   const findRoute = async () => {
-    if (!currentLocation || !destLat || !destLng) return;
+    if (!effectiveStartCoords || !destCoords) {
+      showNotification("Please select both start and destination places.");
+      return;
+    }
     setLoading(true);
     try {
       const res = await fetch(`${API_URL}/api/routes/find`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          start_lat: currentLocation.latitude,
-          start_lng: currentLocation.longitude,
-          end_lat: parseFloat(destLat),
-          end_lng: parseFloat(destLng),
+          start_lat: effectiveStartCoords.lat,
+          start_lng: effectiveStartCoords.lng,
+          end_lat: destCoords.lat,
+          end_lng: destCoords.lng,
         }),
       });
       const data = await res.json();
@@ -735,39 +811,94 @@ function App() {
                 Enter your destination to find the safest route with nearby police stations, hospitals, and safe zones.
               </p>
               <div className="space-y-3">
-                <div className="bg-gray-50 p-3 rounded-lg">
-                  <p className="text-xs text-gray-500 mb-1">From (Current Location)</p>
-                  <p className="text-sm font-medium text-gray-800">
-                    {currentLocation.latitude.toFixed(4)}, {currentLocation.longitude.toFixed(4)}
-                  </p>
+                {/* Start Location */}
+                <div className="relative">
+                  <label className="block text-xs text-gray-500 mb-1">From</label>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => {
+                        setUseCurrentLocation(true);
+                        setStartPlace("");
+                        setStartCoords(null);
+                        setShowStartSuggestions(false);
+                      }}
+                      className={`shrink-0 text-xs px-3 py-2 rounded-lg border transition-colors ${
+                        useCurrentLocation
+                          ? "bg-pink-600 text-white border-pink-600"
+                          : "bg-white text-gray-600 border-gray-300 hover:border-pink-400"
+                      }`}
+                    >
+                      <MapPin size={14} className="inline mr-1" />
+                      My Location
+                    </button>
+                    <div className="flex-1 relative">
+                      <input
+                        type="text"
+                        value={useCurrentLocation ? `Current Location (${currentLocation.latitude.toFixed(4)}, ${currentLocation.longitude.toFixed(4)})` : startPlace}
+                        onChange={(e) => handleStartPlaceChange(e.target.value)}
+                        onFocus={() => { if (!useCurrentLocation && startSuggestions.length > 0) setShowStartSuggestions(true); }}
+                        onBlur={() => setTimeout(() => setShowStartSuggestions(false), 200)}
+                        disabled={useCurrentLocation}
+                        placeholder="Type a place name..."
+                        className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-pink-500 focus:border-transparent outline-none disabled:bg-gray-50 disabled:text-gray-600"
+                      />
+                      {showStartSuggestions && startSuggestions.length > 0 && (
+                        <div className="absolute z-50 top-full left-0 right-0 mt-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-48 overflow-y-auto">
+                          {startSuggestions.map((s, idx) => (
+                            <button
+                              key={idx}
+                              onMouseDown={() => selectStartSuggestion(s)}
+                              className="w-full text-left px-3 py-2 text-sm hover:bg-pink-50 border-b border-gray-100 last:border-0"
+                            >
+                              <MapPin size={12} className="inline mr-1 text-gray-400" />
+                              {s.display_name}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  {!useCurrentLocation && startCoords && (
+                    <p className="text-xs text-green-600 mt-1">Selected: {startCoords.lat.toFixed(4)}, {startCoords.lng.toFixed(4)}</p>
+                  )}
                 </div>
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-xs text-gray-500 mb-1">Destination Latitude</label>
+
+                {/* Destination */}
+                <div className="relative">
+                  <label className="block text-xs text-gray-500 mb-1">To (Destination)</label>
+                  <div className="relative">
                     <input
-                      type="number"
-                      step="any"
-                      value={destLat}
-                      onChange={(e) => setDestLat(e.target.value)}
-                      placeholder="e.g. 28.6250"
+                      type="text"
+                      value={destPlace}
+                      onChange={(e) => handleDestPlaceChange(e.target.value)}
+                      onFocus={() => { if (destSuggestions.length > 0) setShowDestSuggestions(true); }}
+                      onBlur={() => setTimeout(() => setShowDestSuggestions(false), 200)}
+                      placeholder="Type a destination place name..."
                       className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-pink-500 focus:border-transparent outline-none"
                     />
+                    {showDestSuggestions && destSuggestions.length > 0 && (
+                      <div className="absolute z-50 top-full left-0 right-0 mt-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-48 overflow-y-auto">
+                        {destSuggestions.map((s, idx) => (
+                          <button
+                            key={idx}
+                            onMouseDown={() => selectDestSuggestion(s)}
+                            className="w-full text-left px-3 py-2 text-sm hover:bg-pink-50 border-b border-gray-100 last:border-0"
+                          >
+                            <MapPin size={12} className="inline mr-1 text-gray-400" />
+                            {s.display_name}
+                          </button>
+                        ))}
+                      </div>
+                    )}
                   </div>
-                  <div>
-                    <label className="block text-xs text-gray-500 mb-1">Destination Longitude</label>
-                    <input
-                      type="number"
-                      step="any"
-                      value={destLng}
-                      onChange={(e) => setDestLng(e.target.value)}
-                      placeholder="e.g. 77.2200"
-                      className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-pink-500 focus:border-transparent outline-none"
-                    />
-                  </div>
+                  {destCoords && (
+                    <p className="text-xs text-green-600 mt-1">Selected: {destCoords.lat.toFixed(4)}, {destCoords.lng.toFixed(4)}</p>
+                  )}
                 </div>
+
                 <button
                   onClick={findRoute}
-                  disabled={loading || !destLat || !destLng}
+                  disabled={loading || (!useCurrentLocation && !startCoords) || !destCoords}
                   className="w-full bg-gradient-to-r from-blue-600 to-purple-600 text-white py-3 rounded-lg font-medium hover:from-blue-700 hover:to-purple-700 transition-all disabled:opacity-50 flex items-center justify-center gap-2"
                 >
                   <Navigation size={18} />
@@ -850,7 +981,7 @@ function App() {
                       <Marker position={[currentLocation.latitude, currentLocation.longitude]}>
                         <Popup>Start: Your location</Popup>
                       </Marker>
-                      <Marker position={[parseFloat(destLat), parseFloat(destLng)]} icon={sosIcon}>
+                      <Marker position={[destCoords?.lat ?? 0, destCoords?.lng ?? 0]} icon={sosIcon}>
                         <Popup>Destination</Popup>
                       </Marker>
                       {showSafetyRoute &&
